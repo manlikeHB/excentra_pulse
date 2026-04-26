@@ -7,7 +7,7 @@ pub struct LoginResponse {
     pub access_token: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct TradingPairsResponse {
     pub id: Uuid,
     pub base_asset: String,
@@ -40,7 +40,7 @@ pub struct PriceLevelResponse {
     pub quantity: Decimal,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderSide {
     Buy,
@@ -79,6 +79,21 @@ pub struct OrderResponse {
 }
 
 #[derive(Debug, serde::Deserialize)]
+pub struct PlaceOrderResponse {
+    pub order_id: Uuid,
+    pub status: OrderStatus,
+    pub filled_quantity: Decimal,
+    pub remaining_quantity: Decimal,
+    pub trades: Vec<TradeInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TradeInfo {
+    pub price: Decimal,
+    pub quantity: Decimal,
+}
+
+#[derive(Debug, serde::Deserialize)]
 pub struct BalanceResponse {
     pub asset: String,
     pub available: Decimal,
@@ -88,4 +103,12 @@ pub struct BalanceResponse {
 #[derive(serde::Deserialize)]
 pub struct PaginatedResponse<T> {
     pub data: Vec<T>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AssetResponse {
+    pub symbol: String,
+    pub decimals: i16,
+    pub is_active: bool,
+    pub coingecko_id: Option<String>,
 }

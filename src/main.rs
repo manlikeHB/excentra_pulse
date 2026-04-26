@@ -1,14 +1,9 @@
-use excentra_pulse::config::Config;
-use std::collections::HashMap;
+use excentra_pulse::{bot::Bot, config::Config};
 
-fn main() {
-    let bot = Config::from_env();
-
-    println!("bot: {:?}", bot);
-}
-
-pub struct BotState {
-    pub access_token: String,
-    pub bids: HashMap<String, u8>, // pair -> count
-    pub asks: HashMap<String, u8>,
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt().init();
+    let config = Config::from_env();
+    let mut bot = Bot::new(config);
+    bot.run().await;
 }

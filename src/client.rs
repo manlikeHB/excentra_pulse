@@ -1,13 +1,28 @@
 use crate::types::*;
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use reqwest::header::AUTHORIZATION;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
     access_token: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("Unauthorized")]
+    Unauthorized,
+    #[error("Rate limited")]
+    RateLimited,
+    #[error("{0}")]
+    Other(String),
+    #[error(transparent)]
+    Network(#[from] reqwest::Error),
+    #[error(transparent)]
+    Parse(#[from] serde_json::Error),
 }
 
 impl Client {
@@ -24,7 +39,7 @@ impl Client {
         }
     }
 
-    pub async fn login(&mut self, email: &str, password: &str) -> Result<()> {
+    pub async fn login(&mut self, email: &str, password: &str) -> Result<(), ClientError> {
         let res = self
             .http
             .post(format!("{}/auth/login", self.base_url))
@@ -33,7 +48,17 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("Login failed with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         let login_response: LoginResponse = res.json().await?;
@@ -43,7 +68,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn refresh(&mut self) -> Result<()> {
+    pub async fn refresh(&mut self) -> Result<(), ClientError> {
         let res = self
             .http
             .post(format!("{}/auth/refresh", self.base_url))
@@ -51,7 +76,17 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("Token refresh failed with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         let login_response: LoginResponse = res.json().await?;
@@ -60,7 +95,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn get_active_pairs(&self) -> Result<Vec<TradingPairsResponse>> {
+    pub async fn get_active_pairs(&self) -> Result<Vec<TradingPairsResponse>, ClientError> {
         let res = self
             .http
             .get(format!("{}/pairs/active", self.base_url))
@@ -68,13 +103,23 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("Get active pairs failed with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         Ok(res.json().await?)
     }
 
-    pub async fn get_ticker(&self, symbol: &str) -> Result<TickerResponse> {
+    pub async fn get_ticker(&self, symbol: &str) -> Result<TickerResponse, ClientError> {
         let res = self
             .http
             .get(format!(
@@ -86,13 +131,23 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("Get {symbol} ticker failed with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         Ok(res.json().await?)
     }
 
-    pub async fn get_orderbook(&self, symbol: &str) -> Result<OrderBookResponse> {
+    pub async fn get_orderbook(&self, symbol: &str) -> Result<OrderBookResponse, ClientError> {
         let res = self
             .http
             .get(format!(
@@ -104,16 +159,23 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!(
-                "Get {symbol} orderbook failed with status: {}",
-                res.status()
-            );
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         Ok(res.json().await?)
     }
 
-    pub async fn get_orders(&self, symbol: &str) -> Result<Vec<OrderResponse>> {
+    pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OrderResponse>, ClientError> {
         let res = self
             .http
             .get(format!(
@@ -126,7 +188,17 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("Get {symbol} orders failed with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         let paginated_res: PaginatedResponse<OrderResponse> = res.json().await?;
@@ -134,7 +206,7 @@ impl Client {
         Ok(paginated_res.data)
     }
 
-    pub async fn get_balances(&self) -> Result<Vec<BalanceResponse>> {
+    pub async fn get_balances(&self) -> Result<Vec<BalanceResponse>, ClientError> {
         let res = self
             .http
             .get(format!("{}/balances", self.base_url))
@@ -143,13 +215,27 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("failed to get balances with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         Ok(res.json().await?)
     }
 
-    pub async fn deposit(&self, asset: &str, amount: Decimal) -> Result<BalanceResponse> {
+    pub async fn deposit(
+        &self,
+        asset: &str,
+        amount: Decimal,
+    ) -> Result<BalanceResponse, ClientError> {
         let res = self
             .http
             .post(format!("{}/balances/deposit", self.base_url))
@@ -159,7 +245,17 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("failed to deposit {asset} with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         Ok(res.json().await?)
@@ -172,30 +268,44 @@ impl Client {
         order_type: OrderType,
         price: Option<Decimal>,
         quantity: Decimal,
-    ) -> Result<OrderResponse> {
+    ) -> Result<PlaceOrderResponse, ClientError> {
         let res = self
             .http
-            .post(format!("{}/orders", self.base_url)).json(&serde_json::json!({
-                "symbol": symbol, 
-                "side": side, 
-                "order_type": order_type, 
-                "price": price.map(|p| p.to_string()), 
-                "quantity": quantity.to_string() 
-            })).header(AUTHORIZATION, self.auth_header()?)
+            .post(format!("{}/orders", self.base_url))
+            .json(&serde_json::json!({
+                "symbol": symbol,
+                "side": side,
+                "order_type": order_type,
+                "price": price.map(|p| p.to_string()),
+                "quantity": quantity.to_string()
+            }))
+            .header(AUTHORIZATION, self.auth_header()?)
             .send()
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!(
-                "failed to place {symbol} order with status: {}",
-                res.status()
-            );
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
-        Ok(res.json().await?)
+        let response = match res.json::<PlaceOrderResponse>().await {
+            Ok(o) => o,
+            Err(e) => panic!("Failing to deserialize: {e:?}")
+        };
+        Ok(response)
+        // Ok(res.json().await?)
     }
 
-    pub async fn cancel_order(&self, id: Uuid) -> Result<()> {
+    pub async fn cancel_order(&self, id: Uuid) -> Result<(), ClientError> {
         let res = self
             .http
             .delete(format!("{}/orders/{}", self.base_url, id))
@@ -204,18 +314,71 @@ impl Client {
             .await?;
 
         if !res.status().is_success() {
-            anyhow::bail!("failed to cancel order with status: {}", res.status());
+            match res.status().as_u16() {
+                401 => return Err(ClientError::Unauthorized),
+                429 => return Err(ClientError::RateLimited),
+                _ => {
+                    return Err(ClientError::Other(format!(
+                        "Request failed with status {}: {}",
+                        res.status(),
+                        res.text().await.unwrap_or_default()
+                    )));
+                }
+            }
         }
 
         Ok(())
     }
 
-    fn auth_header(&self) -> Result<String> {
+    pub async fn get_assets(&self) -> Result<Vec<AssetResponse>, ClientError> {
+        let res = self
+            .http
+            .get(format!("{}/assets", self.base_url))
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            return Err(match res.status().as_u16() {
+                401 => ClientError::Unauthorized,
+                429 => ClientError::RateLimited,
+                _ => ClientError::Other(format!(
+                    "Request failed with status {}: {}",
+                    res.status(),
+                    res.text().await.unwrap_or_default()
+                )),
+            });
+        }
+
+        Ok(res.json().await?)
+    }
+
+    fn auth_header(&self) -> Result<String, ClientError> {
         let token = self
             .access_token
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Not logged in — access token missing"))?;
+            .ok_or(ClientError::Unauthorized)?;
         Ok(format!("Bearer {}", token))
+    }
+
+    pub async fn http_get_external(
+        &self,
+        url: &str,
+    ) -> Result<HashMap<String, serde_json::Value>, ClientError> {
+        let res = self
+            .http
+            .get(url)
+            .header("User-Agent", "Excentra-Pulse/1.0")
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            return Err(ClientError::Other(format!(
+                "External request failed: {}",
+                res.status()
+            )));
+        }
+
+        Ok(res.json().await?)
     }
 }
 
