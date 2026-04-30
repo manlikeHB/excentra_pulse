@@ -1,5 +1,12 @@
+use crate::utils::{
+    balance::{get_min_balance, max_deposit},
+    maths::{
+        random_base_quantity_to_buy, random_base_quantity_to_sell, random_decimal, random_number,
+        random_quote_to_spend,
+    },
+};
+
 use anyhow::Result;
-use rand::RngExt;
 use rust_decimal::{Decimal, dec};
 use std::{
     sync::Arc,
@@ -562,101 +569,4 @@ impl Bot {
     fn trigger_backoff(&mut self) {
         self.backoff_until = Some(Instant::now());
     }
-}
-
-pub fn random_number(min: usize, max: usize) -> usize {
-    rand::rng().random_range(min..=max)
-}
-
-pub fn random_decimal(min: Decimal, max: Decimal) -> Decimal {
-    let scale = 1_000_000; // precision
-    let r = rand::rng().random_range(0..=scale);
-
-    let fraction = Decimal::from(r) / Decimal::from(scale);
-
-    min + (max - min) * fraction
-}
-
-// Deposit targets per asset — set just below the exchange's per-request deposit cap.
-// Hardcoded temporarily. When new assets are added to the exchange, add them here.
-// See: BalanceRequest::validate_deposit in the exchange codebase.
-fn max_deposit(asset: &str) -> Decimal {
-    match asset {
-        "USDT" => dec!(1000),
-        "BTC" => dec!(0.05),
-        "ETH" => dec!(0.5),
-        "SOL" => dec!(5),
-        _ => {
-            tracing::warn!(asset = %asset, "Unknown asset, no deposit target defined");
-            dec!(0)
-        }
-    }
-}
-
-fn random_base_quantity_to_buy(
-    quote_balance: Decimal,
-    price: Decimal,
-    min: Decimal,
-    max: Decimal,
-) -> Decimal {
-    if price <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    // Max you can spend (respect balance + cap)
-    let max_notional = quote_balance.min(dec!(1000));
-
-    if max_notional <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    // Sample notional (USD)
-    let random_num = random_decimal(min, max);
-    let notional = random_num * max_notional;
-
-    // Convert to base quantity
-    notional / price
-}
-
-fn random_base_quantity_to_sell(
-    base_balance: Decimal,
-    price: Decimal,
-    min: Decimal,
-    max: Decimal,
-) -> Decimal {
-    if price <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    // Convert base balance → notional (USD)
-    let base_notional = base_balance * price;
-
-    // Cap by max allowed notional
-    let max_notional = base_notional.min(dec!(1000));
-
-    if max_notional <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    // Sample notional (USD)
-    let random_num = random_decimal(min, max);
-    let notional = random_num * max_notional;
-
-    // Convert back to base quantity
-    notional / price
-}
-
-fn random_quote_to_spend(quote_balance: Decimal, min: Decimal, max: Decimal) -> Decimal {
-    let max_notional = quote_balance.min(dec!(1000));
-
-    if max_notional <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    let random_num = random_decimal(min, max);
-    random_num * max_notional // return USDT to spend
-}
-
-fn get_min_balance(asset: &str) -> Decimal {
-    max_deposit(asset) / dec!(10)
 }
