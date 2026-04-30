@@ -1,18 +1,24 @@
 use anyhow::Result;
 use rand::RngExt;
-use rust_decimal::{Decimal, dec, prelude::*};
-use std::{collections::HashMap, time::Duration};
+use rust_decimal::{Decimal, dec};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     client::{Client, ClientError},
-    config::Config,
-    types::{AssetResponse, OrderResponse, OrderSide, OrderType},
+    config::{BotRole, Config},
+    price_service::PriceService,
+    types::{OrderResponse, OrderSide, OrderType},
 };
 
 pub struct Bot {
     client: Client,
     config: Config,
-    assets: HashMap<String, AssetResponse>,
+    taker_state: Option<TakerState>,
+    price_service: Arc<PriceService>,
+    backoff_until: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -21,63 +27,75 @@ struct PairBalance {
     pub quote_balance: Decimal,
 }
 
-/*
-- Bot needs to login
-- Get all asset
-- loop at interval
-- Get all trading pair
-- Select a random pair
-- Get Ticker price for that pair
-- Check current open orders
-    if deviated from stale threshold
-        close
-    if not
-        continue
-- check balance of quote and base for selected pair
-    if lower than minimum balance
-        top up to target balance
-- Decide to be a taker or maker
-    if Taker
-        - Decide whether to buy or sell
-            if buy
-                compute how much base asset to buy
-                compare price of base computed relative to current quote balance
-                    if higher
-                        scale down to an amount the current Usdt balance can cover
-                    if lower
-                        proceed to buy
-            if Sell
-                compute how much base asset to sell
-                check if base balance can cover base amount to sell
-                    if higher
-                        scale down
-                    if lower
-                        proceed to sell
-    if Maker
-        check number of current open orders
-            if >= ORDER_CAP
-                return;
-        for Ask
-            compute ask price * (1 - spread)
-            compute random quantity
-                if > base balance
-                    scale down
-                if < base balance
-                    place limit order
-        for Bids
-            compute bid price * (1 + spread)
-            compute random quantity
-                if (qty * bid price) > quote balance
-                    scale down
-                if < quote balance
-                    place limit order
-*/
+struct TakerState {
+    bias: Bias,
+    remaining_cycle: u8,
+}
 
-/*
-Known limitations
-- access token expires every 15 mins: the bot can encounter a 401 error, it needs to refresh the token, if that doesn't work it needs to re-login. then still recall the function where it faced the error and proceed with the remaining steps.
-- the endpoints are rate limited
-*/
+enum Bias {
+    Bullish,
+    Bearish,
+    Neutral,
+}
+
+impl TakerState {
+    fn new() -> Self {
+        TakerState {
+            bias: Bias::random_bias(),
+            remaining_cycle: 15,
+        }
+    }
+}
+
+impl Bias {
+    fn to_dec(&self) -> Decimal {
+        match self {
+            Bias::Bearish => dec!(0.3),
+            Bias::Bullish => dec!(0.7),
+            Bias::Neutral => dec!(0.5),
+        }
+    }
+
+    fn to_bias(n: u8) -> Option<Bias> {
+        match n {
+            1 => Some(Bias::Bearish),
+            2 => Some(Bias::Bullish),
+            3 => Some(Bias::Neutral),
+            _ => None,
+        }
+    }
+
+    fn random_bias() -> Self {
+        let num = random_number(1, 3);
+        Self::to_bias(num as u8).unwrap_or(Bias::Bullish)
+    }
+
+    fn buy_size(&self) -> (Decimal, Decimal) {
+        match self {
+            Bias::Bullish => (dec!(0.6), dec!(1.0)),
+            Bias::Neutral => (dec!(0.3), dec!(0.6)),
+            Bias::Bearish => (dec!(0.1), dec!(0.3)),
+        }
+    }
+
+    fn sell_size(&self) -> (Decimal, Decimal) {
+        match self {
+            Bias::Bullish => (dec!(0.1), dec!(0.3)),
+            Bias::Neutral => (dec!(0.3), dec!(0.6)),
+            Bias::Bearish => (dec!(0.6), dec!(1.0)),
+        }
+    }
+}
+
+impl std::fmt::Display for Bias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Bias::Bearish => write!(f, "Bearish"),
+            Bias::Bullish => write!(f, "Bullish"),
+            Bias::Neutral => write!(f, "Neutral"),
+        }
+    }
+}
 
 macro_rules! try_call {
     ($self:ident, $call:expr) => {
@@ -92,12 +110,22 @@ macro_rules! try_call {
 }
 
 impl Bot {
-    pub fn new(config: Config) -> Self {
-        let base_url = format!("{}/api/v1", &config.exchange_url);
+    pub fn new(
+        config: Config,
+        client: Client,
+        role: BotRole,
+        price_service: Arc<PriceService>,
+    ) -> Self {
         Bot {
-            client: Client::new(&base_url),
+            client,
             config,
-            assets: HashMap::new(),
+            taker_state: if role == BotRole::Taker {
+                Some(TakerState::new())
+            } else {
+                None
+            },
+            price_service,
+            backoff_until: None,
         }
     }
 
@@ -113,16 +141,10 @@ impl Bot {
 
         tracing::info!(email = %self.config.email, "Bot logged in successfully");
 
-        match self.client.get_assets().await {
-            Ok(assets) => {
-                self.assets = assets.into_iter().map(|a| (a.symbol.clone(), a)).collect();
-                tracing::info!(count = %self.assets.len(), "Assets loaded");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to fetch assets, exiting");
-                return;
-            }
-        }
+        // if self.taker_state.is_some() {
+        //     tracing::info!("Taker is sleeping for 1 min");
+        //     tokio::time::sleep(Duration::from_secs(60)).await
+        // }
 
         loop {
             if let Err(e) = self.cycle().await {
@@ -133,6 +155,15 @@ impl Bot {
     }
 
     async fn cycle(&mut self) -> Result<()> {
+        if let Some(instant) = self.backoff_until {
+            if instant.elapsed() < Duration::from_secs(30) {
+                tracing::warn!("Bot in backoff, skipping cycle");
+                return Ok(());
+            } else {
+                self.backoff_until = None;
+            }
+        }
+
         let pairs = match try_call!(self, self.client.get_active_pairs()) {
             Ok(p) => p,
             Err(e) => {
@@ -161,52 +192,18 @@ impl Bot {
             }
         };
 
-        let open_orders = match try_call!(self, self.client.get_open_orders(&symbol)) {
-            Ok(orders) => orders,
-            Err(e) => {
-                tracing::warn!(symbol = %symbol, error = %e, "Failed to fetch open orders, skipping cycle");
-                return Ok(());
-            }
-        };
-
-        // Cancel stale orders, keep fresh ones
-        let mut remaining_orders = Vec::new();
-        for order in open_orders {
-            let order_price = match order.price {
-                Some(price) => price,
-                None => {
-                    tracing::warn!(order_id = %order.id, "Limit order missing price, skipping");
-                    continue;
-                }
-            };
-
-            let drift = (mid_price - order_price).abs() / mid_price;
-            if drift > self.config.stale_threshold {
-                if let Err(e) = self.client.cancel_order(order.id).await {
-                    tracing::warn!(error = %e, order_id = %order.id, "Failed to cancel stale order");
-                }
-            } else {
-                remaining_orders.push(order);
-            }
-        }
-
         let pair_balance = match self.ensure_balance(base_asset, quote_asset).await {
             Ok(Some(pair_balance)) => pair_balance,
             _ => return Ok(()),
         };
 
-        eprintln!("pair balance: {:?}", pair_balance);
-
-        // Roll taker dice
-        if random_decimal(dec!(0.0), dec!(1.0))
-            < Decimal::from_f64(self.config.taker_prob).unwrap_or(dec!(0.15))
-        {
-            eprintln!("Inside taker..............................");
-            self.taker_cycle(&symbol, &pair_balance).await?;
-        } else {
-            eprintln!("Inside maker..............................");
-            self.maker_cycle(&symbol, mid_price, &pair_balance, remaining_orders)
-                .await?;
+        match self.config.role {
+            BotRole::Maker => {
+                self.maker_cycle(&symbol, mid_price, &pair_balance).await?;
+            }
+            BotRole::Taker => {
+                self.taker_cycle(&symbol, &pair_balance).await?;
+            }
         }
 
         Ok(())
@@ -217,17 +214,36 @@ impl Bot {
         symbol: &str,
         mid_price: Decimal,
         available_balance: &PairBalance,
-        open_orders: Vec<OrderResponse>,
     ) -> Result<()> {
+        let open_orders = match self.cancel_stale_orders(symbol, mid_price).await? {
+            Some(orders) => orders,
+            None => return Ok(()),
+        };
+
         let bids_count = open_orders
             .iter()
             .filter(|o| o.side == OrderSide::Buy)
             .count();
         let asks_count = open_orders.len() - bids_count;
 
-        if bids_count < self.config.order_cap as usize {
-            let bid_price = mid_price * (dec!(1) - self.config.spread);
-            let quantity = random_base_quantity_to_buy(available_balance.quote_balance, bid_price);
+        let order_cap = self.config.order_cap.unwrap_or_else(|| {
+            tracing::warn!("Order cap not set using default value");
+            10_u8
+        });
+
+        let spread = self.config.spread.unwrap_or_else(|| {
+            tracing::warn!("Spread not set using default value");
+            dec!(0.003)
+        });
+
+        if bids_count < order_cap as usize {
+            let bid_price = mid_price * (dec!(1) - spread);
+            let quantity = random_base_quantity_to_buy(
+                available_balance.quote_balance,
+                bid_price,
+                dec!(0.1),
+                dec!(1),
+            );
 
             if let Err(e) = self
                 .client
@@ -240,15 +256,29 @@ impl Bot {
                 )
                 .await
             {
-                tracing::warn!(error = %e, "Failed to place maker bid");
+                match e {
+                    ClientError::RateLimited => {
+                        tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
+                        self.trigger_backoff();
+                        return Ok(());
+                    }
+                    _ => tracing::warn!(error = %e, "Failed to place maker bid"),
+                }
             } else {
                 tracing::info!(symbol = %symbol, price = %bid_price, quantity = %quantity, "Placed maker bid");
             }
+        } else {
+            tracing::info!(symbol = %symbol, cap = self.config.order_cap, "Max maker Bids order cap reached");
         }
 
-        if asks_count < self.config.order_cap as usize {
-            let ask_price = mid_price * (dec!(1) + self.config.spread);
-            let quantity = random_base_quantity_to_sell(available_balance.base_balance);
+        if asks_count < order_cap as usize {
+            let ask_price = mid_price * (dec!(1) + spread);
+            let quantity = random_base_quantity_to_sell(
+                available_balance.base_balance,
+                ask_price,
+                dec!(0.1),
+                dec!(1),
+            );
 
             if let Err(e) = self
                 .client
@@ -261,10 +291,19 @@ impl Bot {
                 )
                 .await
             {
-                tracing::warn!(error = %e, "Failed to place maker ask");
+                match e {
+                    ClientError::RateLimited => {
+                        tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
+                        self.trigger_backoff();
+                        return Ok(());
+                    }
+                    _ => tracing::warn!(error = %e, "Failed to place maker ask"),
+                }
             } else {
                 tracing::info!(symbol = %symbol, price = %ask_price, quantity = %quantity, "Placed maker ask");
             }
+        } else {
+            tracing::info!(symbol = %symbol, cap = self.config.order_cap, "Max maker Ask order cap reached");
         }
 
         Ok(())
@@ -279,62 +318,79 @@ impl Bot {
             }
         };
 
-        // Coin flip
-        if random_number(0, 1) == 0 {
-            let best_ask = match orderbook.asks.first() {
-                Some(level) => level.price,
-                None => {
-                    tracing::warn!(symbol = %symbol, "Ask side empty, skipping taker buy");
-                    return Ok(());
-                }
-            };
-
-            // let price = best_ask * (dec!(1) + dec!(0.001));
-            let price = best_ask;
-            let quantity = random_base_quantity_to_buy(available_balance.quote_balance, price);
-
-            if let Err(e) = self
-                .client
-                .place_order(
-                    symbol,
-                    OrderSide::Buy,
-                    OrderType::Market,
-                    None,
-                    quantity,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to place taker buy");
-            } else {
-                tracing::info!(symbol = %symbol, price = %price, quantity = %quantity, "Placed taker buy");
+        if let Some(ticker_state) = self.taker_state.as_mut() {
+            if ticker_state.remaining_cycle == 0 {
+                ticker_state.bias = Bias::random_bias();
+                ticker_state.remaining_cycle = 15;
             }
-        } else {
-            let best_bid = match orderbook.bids.first() {
-                Some(level) => level.price,
-                None => {
-                    tracing::warn!(symbol = %symbol, "Bid side empty, skipping taker sell");
-                    return Ok(());
+
+            tracing::info!(bias = %ticker_state.bias, remaining_cycle = %ticker_state.remaining_cycle, "Bias for this cycle");
+
+            if random_decimal(dec!(0), dec!(1)) <= ticker_state.bias.to_dec() {
+                let best_ask = match orderbook.asks.first() {
+                    Some(level) => level.price,
+                    None => {
+                        tracing::warn!(symbol = %symbol, "Ask side empty, skipping taker buy");
+                        ticker_state.remaining_cycle -= 1;
+                        return Ok(());
+                    }
+                };
+
+                let price = best_ask;
+                let (min, max) = ticker_state.bias.buy_size();
+                let quantity = random_quote_to_spend(available_balance.quote_balance, min, max);
+
+                if let Err(e) = self
+                    .client
+                    .place_order(symbol, OrderSide::Buy, OrderType::Market, None, quantity)
+                    .await
+                {
+                    match e {
+                        ClientError::RateLimited => {
+                            tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
+                            self.trigger_backoff();
+                            return Ok(());
+                        }
+                        _ => tracing::warn!(error = %e, "Failed to place taker ask"),
+                    }
+                } else {
+                    tracing::info!(symbol = %symbol, price = %price, quantity = %quantity, "Placed taker buy");
                 }
-            };
 
-            // let price = best_bid * (dec!(1) - dec!(0.001));
-            let price = best_bid;
-            let quantity = random_base_quantity_to_sell(available_balance.base_balance);
-
-            if let Err(e) = self
-                .client
-                .place_order(
-                    symbol,
-                    OrderSide::Sell,
-                    OrderType::Market,
-                    None,
-                    quantity,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to place taker sell");
+                ticker_state.remaining_cycle -= 1;
             } else {
-                tracing::info!(symbol = %symbol, price = %price, quantity = %quantity, "Placed taker sell");
+                let best_bid = match orderbook.bids.first() {
+                    Some(level) => level.price,
+                    None => {
+                        tracing::warn!(symbol = %symbol, "Bid side empty, skipping taker sell");
+                        ticker_state.remaining_cycle -= 1;
+                        return Ok(());
+                    }
+                };
+
+                let price = best_bid;
+                let (min, max) = ticker_state.bias.sell_size();
+                let quantity =
+                    random_base_quantity_to_sell(available_balance.base_balance, price, min, max);
+
+                if let Err(e) = self
+                    .client
+                    .place_order(symbol, OrderSide::Sell, OrderType::Market, None, quantity)
+                    .await
+                {
+                    match e {
+                        ClientError::RateLimited => {
+                            tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
+                            self.trigger_backoff();
+                            return Ok(());
+                        }
+                        _ => tracing::warn!(error = %e, "Failed to place taker sell"),
+                    }
+                } else {
+                    tracing::info!(symbol = %symbol, price = %price, quantity = %quantity, "Placed taker sell");
+                }
+
+                ticker_state.remaining_cycle -= 1;
             }
         }
 
@@ -400,6 +456,7 @@ impl Bot {
                     }
                     Err(ClientError::RateLimited) => {
                         tracing::warn!(asset = %asset, "Deposit rate limited, skipping cycle");
+                        self.trigger_backoff();
                         return None;
                     }
                     Err(e) => {
@@ -416,11 +473,11 @@ impl Bot {
         Some(asset_balance)
     }
 
-    async fn get_mid_price(&self, symbol: &str, base_asset: &str) -> Option<Decimal> {
+    async fn get_mid_price(&mut self, symbol: &str, base_asset: &str) -> Option<Decimal> {
         match self.client.get_ticker(symbol).await {
             Ok(ticker) => return Some(ticker.last_price),
             Err(ClientError::Other(_)) => {
-                tracing::warn!(symbol = %symbol, "Ticker not available, trying CoinGecko fallback");
+                tracing::warn!(symbol = %symbol, "Ticker not available, trying price service");
             }
             Err(e) => {
                 tracing::warn!(symbol = %symbol, error = %e, "Ticker failed");
@@ -428,55 +485,23 @@ impl Bot {
             }
         }
 
-        // try CoinGecko using coingecko_id from loaded assets
-        let coingecko_id = self
-            .assets
-            .get(base_asset)
-            .and_then(|a| a.coingecko_id.as_deref().map(|s| s.to_string()));
-
-        if let Some(id) = coingecko_id {
-            match self.fetch_coingecko_price(&id).await {
-                Ok(price) => {
-                    tracing::info!(asset = %base_asset, price = %price, "Price from CoinGecko");
-                    return Some(price);
-                }
-                Err(e) => {
-                    tracing::warn!(asset = %base_asset, error = %e, "CoinGecko fallback failed")
-                }
+        // get cached price from price service
+        match self.price_service.get_price(base_asset) {
+            Some(price) => return Some(price),
+            None => {
+                tracing::warn!(asset = %base_asset, "Price service empty, using hardcoded fallback");
+                let price = match base_asset {
+                    "BTC" => dec!(75000),
+                    "ETH" => dec!(2500),
+                    "SOL" => dec!(85),
+                    _ => {
+                        tracing::warn!(asset = %base_asset, "No fallback price available");
+                        return None;
+                    }
+                };
+                Some(price)
             }
         }
-
-        // hardcoded fallback
-        let price = match base_asset {
-            "BTC" => dec!(70000),
-            "ETH" => dec!(2500),
-            "SOL" => dec!(80),
-            _ => {
-                tracing::warn!(asset = %base_asset, "No fallback price available");
-                return None;
-            }
-        };
-
-        tracing::warn!(asset = %base_asset, price = %price, "Using hardcoded fallback price");
-        Some(price)
-    }
-
-    async fn fetch_coingecko_price(&self, coingecko_id: &str) -> Result<Decimal> {
-        let url = format!(
-            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd",
-            coingecko_id
-        );
-
-        let res: HashMap<String, serde_json::Value> = self.client.http_get_external(&url).await?;
-
-        let price = res
-            .get(coingecko_id)
-            .and_then(|v| v.get("usd"))
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| anyhow::anyhow!("No price in CoinGecko response"))?;
-
-        Decimal::from_f64(price)
-            .ok_or_else(|| anyhow::anyhow!("Failed to convert CoinGecko price to Decimal"))
     }
 
     async fn reauthenticate(&mut self) -> Result<(), ClientError> {
@@ -490,6 +515,53 @@ impl Bot {
         tracing::info!("Re-authentication successfully");
         Ok(())
     }
+
+    async fn cancel_stale_orders(
+        &mut self,
+        symbol: &str,
+        mid_price: Decimal,
+    ) -> Result<Option<Vec<OrderResponse>>> {
+        let open_orders = match try_call!(self, self.client.get_open_orders(&symbol)) {
+            Ok(orders) => orders,
+            Err(e) => {
+                tracing::warn!(symbol = %symbol, error = %e, "Failed to fetch open orders, skipping cycle");
+                return Ok(None);
+            }
+        };
+
+        // Cancel stale orders, keep fresh ones
+        let mut remaining_orders = Vec::new();
+        for order in open_orders {
+            let order_price = match order.price {
+                Some(price) => price,
+                None => {
+                    tracing::warn!(order_id = %order.id, "Limit order missing price, skipping");
+                    continue;
+                }
+            };
+
+            let drift = (mid_price - order_price).abs() / mid_price;
+
+            let stale_threshold = self.config.stale_threshold.unwrap_or_else(|| {
+                tracing::warn!("stale_threshold not set using default value");
+                dec!(0.003)
+            });
+
+            if drift > stale_threshold {
+                if let Err(e) = self.client.cancel_order(order.id).await {
+                    tracing::warn!(error = %e, order_id = %order.id, "Failed to cancel stale order");
+                }
+            } else {
+                remaining_orders.push(order);
+            }
+        }
+
+        Ok(Some(remaining_orders))
+    }
+
+    fn trigger_backoff(&mut self) {
+        self.backoff_until = Some(Instant::now());
+    }
 }
 
 pub fn random_number(min: usize, max: usize) -> usize {
@@ -497,10 +569,12 @@ pub fn random_number(min: usize, max: usize) -> usize {
 }
 
 pub fn random_decimal(min: Decimal, max: Decimal) -> Decimal {
-    let min_f = min.to_f64().unwrap_or(0.0);
-    let max_f = max.to_f64().unwrap_or(1.0);
-    let val = rand::rng().random_range(min_f..=max_f);
-    Decimal::from_f64(val).unwrap_or(min)
+    let scale = 1_000_000; // precision
+    let r = rand::rng().random_range(0..=scale);
+
+    let fraction = Decimal::from(r) / Decimal::from(scale);
+
+    min + (max - min) * fraction
 }
 
 // Deposit targets per asset — set just below the exchange's per-request deposit cap.
@@ -519,27 +593,69 @@ fn max_deposit(asset: &str) -> Decimal {
     }
 }
 
-/*
-This compute a valid base quantity that can be bought
-- balance: balance of quote asset
-- price: price for a single unit of base asset
-*/
-fn random_base_quantity_to_buy(quote_balance: Decimal, price: Decimal) -> Decimal {
-    let random_num = random_decimal(dec!(0.1), dec!(1));
+fn random_base_quantity_to_buy(
+    quote_balance: Decimal,
+    price: Decimal,
+    min: Decimal,
+    max: Decimal,
+) -> Decimal {
+    if price <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
 
-    // compute random balance amount to spend
-    let amount = random_num * quote_balance;
+    // Max you can spend (respect balance + cap)
+    let max_notional = quote_balance.min(dec!(1000));
 
-    // valid quantity that can be bought
-    amount / price
+    if max_notional <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+
+    // Sample notional (USD)
+    let random_num = random_decimal(min, max);
+    let notional = random_num * max_notional;
+
+    // Convert to base quantity
+    notional / price
 }
 
-fn random_base_quantity_to_sell(base_balance: Decimal) -> Decimal {
-    let random_num = random_decimal(dec!(0.1), dec!(1));
+fn random_base_quantity_to_sell(
+    base_balance: Decimal,
+    price: Decimal,
+    min: Decimal,
+    max: Decimal,
+) -> Decimal {
+    if price <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
 
-    base_balance * random_num
+    // Convert base balance → notional (USD)
+    let base_notional = base_balance * price;
+
+    // Cap by max allowed notional
+    let max_notional = base_notional.min(dec!(1000));
+
+    if max_notional <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+
+    // Sample notional (USD)
+    let random_num = random_decimal(min, max);
+    let notional = random_num * max_notional;
+
+    // Convert back to base quantity
+    notional / price
 }
 
+fn random_quote_to_spend(quote_balance: Decimal, min: Decimal, max: Decimal) -> Decimal {
+    let max_notional = quote_balance.min(dec!(1000));
+
+    if max_notional <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+
+    let random_num = random_decimal(min, max);
+    random_num * max_notional // return USDT to spend
+}
 
 fn get_min_balance(asset: &str) -> Decimal {
     max_deposit(asset) / dec!(10)

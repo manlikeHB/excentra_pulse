@@ -5,6 +5,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
@@ -299,7 +300,7 @@ impl Client {
 
         let response = match res.json::<PlaceOrderResponse>().await {
             Ok(o) => o,
-            Err(e) => panic!("Failing to deserialize: {e:?}")
+            Err(e) => panic!("Failing to deserialize: {e:?}"),
         };
         Ok(response)
         // Ok(res.json().await?)
@@ -359,29 +360,27 @@ impl Client {
             .ok_or(ClientError::Unauthorized)?;
         Ok(format!("Bearer {}", token))
     }
-
-    pub async fn http_get_external(
-        &self,
-        url: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, ClientError> {
-        let res = self
-            .http
-            .get(url)
-            .header("User-Agent", "Excentra-Pulse/1.0")
-            .send()
-            .await?;
-
-        if !res.status().is_success() {
-            return Err(ClientError::Other(format!(
-                "External request failed: {}",
-                res.status()
-            )));
-        }
-
-        Ok(res.json().await?)
-    }
 }
 
 fn to_path_symbol(symbol: &str) -> String {
     symbol.replace("/", "-")
+}
+
+pub async fn http_get_external(
+    url: &str,
+) -> Result<HashMap<String, serde_json::Value>, ClientError> {
+    let res = reqwest::Client::new()
+        .get(url)
+        .header("User-Agent", "Excentra-Pulse/1.0")
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        return Err(ClientError::Other(format!(
+            "External request failed: {}",
+            res.status()
+        )));
+    }
+
+    Ok(res.json().await?)
 }
