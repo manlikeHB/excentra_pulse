@@ -161,9 +161,17 @@ impl<T: ExchangeClient> Bot<T> {
     }
 
     async fn cycle(&mut self) -> Result<()> {
-        if let Some(instant) = self.backoff_until {
-            if instant.elapsed() < Duration::from_secs(30) {
-                tracing::warn!("Bot in backoff, skipping cycle");
+        if let Some(until) = self.backoff_until {
+            let now = Instant::now();
+
+            if now < until {
+                let remaining = until.duration_since(now);
+
+                tracing::warn!(
+                    "Bot in backoff, skipping cycle: {} mins remaining",
+                    remaining.as_secs() / 60
+                );
+
                 return Ok(());
             } else {
                 self.backoff_until = None;
@@ -231,13 +239,6 @@ impl<T: ExchangeClient> Bot<T> {
         mid_price: Decimal,
         available_balance: &PairBalance,
     ) -> Result<()> {
-        // Safety guard — maker_cycle should never run for a taker bot
-        // TODO: Investigate why the taker is able to place limit orders
-        if self.config.role != BotRole::Maker {
-            tracing::error!("maker_cycle called on non-maker bot, this is a bug");
-            return Ok(());
-        }
-
         let open_orders = match self.cancel_stale_orders(symbol, mid_price).await? {
             Some(orders) => orders,
             None => return Ok(()),
@@ -283,9 +284,9 @@ impl<T: ExchangeClient> Bot<T> {
                 .await
             {
                 match e {
-                    ClientError::RateLimited => {
+                    ClientError::RateLimited(secs) => {
                         tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
-                        self.trigger_backoff();
+                        self.trigger_backoff(secs);
                         return Ok(());
                     }
                     _ => tracing::warn!(error = %e, "Failed to place maker bid"),
@@ -318,9 +319,9 @@ impl<T: ExchangeClient> Bot<T> {
                 .await
             {
                 match e {
-                    ClientError::RateLimited => {
+                    ClientError::RateLimited(secs) => {
                         tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
-                        self.trigger_backoff();
+                        self.trigger_backoff(secs);
                         return Ok(());
                     }
                     _ => tracing::warn!(error = %e, "Failed to place maker ask"),
@@ -336,12 +337,6 @@ impl<T: ExchangeClient> Bot<T> {
     }
 
     async fn taker_cycle(&mut self, symbol: &str, available_balance: &PairBalance) -> Result<()> {
-        // Safety guard
-        if self.config.role != BotRole::Taker {
-            tracing::error!("taker_cycle called on non-taker bot, this is a bug");
-            return Ok(());
-        }
-
         let orderbook = match try_call!(self, self.client.get_orderbook(symbol)) {
             Ok(o) => o,
             Err(e) => {
@@ -380,9 +375,9 @@ impl<T: ExchangeClient> Bot<T> {
                     .await
                 {
                     match e {
-                        ClientError::RateLimited => {
+                        ClientError::RateLimited(secs) => {
                             tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
-                            self.trigger_backoff();
+                            self.trigger_backoff(secs);
                             return Ok(());
                         }
                         _ => tracing::warn!(error = %e, "Failed to place taker ask"),
@@ -410,9 +405,9 @@ impl<T: ExchangeClient> Bot<T> {
                     .await
                 {
                     match e {
-                        ClientError::RateLimited => {
+                        ClientError::RateLimited(secs) => {
                             tracing::warn!(error = %e, "Place order rate limited, skipping cycle");
-                            self.trigger_backoff();
+                            self.trigger_backoff(secs);
                             return Ok(());
                         }
                         _ => tracing::warn!(error = %e, "Failed to place taker sell"),
@@ -485,9 +480,9 @@ impl<T: ExchangeClient> Bot<T> {
                         tracing::info!(asset = %asset, amount = %target, "Deposited asset");
                         return Some(target + asset_balance);
                     }
-                    Err(ClientError::RateLimited) => {
+                    Err(ClientError::RateLimited(secs)) => {
                         tracing::warn!(asset = %asset, "Deposit rate limited, skipping cycle");
-                        self.trigger_backoff();
+                        self.trigger_backoff(secs);
                         return None;
                     }
                     Err(e) => {
@@ -590,8 +585,9 @@ impl<T: ExchangeClient> Bot<T> {
         Ok(Some(remaining_orders))
     }
 
-    fn trigger_backoff(&mut self) {
-        self.backoff_until = Some(Instant::now());
+    fn trigger_backoff(&mut self, secs: u64) {
+        tracing::warn!(secs = secs, "Rate limited, backing off");
+        self.backoff_until = Some(Instant::now() + Duration::from_secs(secs));
     }
 
     async fn cancel_all_open_orders(&mut self) {

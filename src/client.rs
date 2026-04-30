@@ -1,6 +1,6 @@
 use crate::types::*;
 use anyhow::Result;
-use reqwest::header::AUTHORIZATION;
+use reqwest::{Response, header::AUTHORIZATION};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -39,8 +39,8 @@ impl Client {
 pub enum ClientError {
     #[error("Unauthorized")]
     Unauthorized,
-    #[error("Rate limited")]
-    RateLimited,
+    #[error("Rate limited, retry after {0}s")]
+    RateLimited(u64),
     #[error("{0}")]
     Other(String),
     #[error(transparent)]
@@ -87,7 +87,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -115,7 +115,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -142,7 +142,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -170,7 +170,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -198,7 +198,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -227,7 +227,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -254,7 +254,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -280,7 +280,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -319,7 +319,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -349,7 +349,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             match res.status().as_u16() {
                 401 => return Err(ClientError::Unauthorized),
-                429 => return Err(ClientError::RateLimited),
+                429 => return Err(parse_rate_limit_error(res).await),
                 _ => {
                     return Err(ClientError::Other(format!(
                         "Request failed with status {}: {}",
@@ -373,7 +373,7 @@ impl ExchangeClient for Client {
         if !res.status().is_success() {
             return Err(match res.status().as_u16() {
                 401 => ClientError::Unauthorized,
-                429 => ClientError::RateLimited,
+                429 => parse_rate_limit_error(res).await,
                 _ => ClientError::Other(format!(
                     "Request failed with status {}: {}",
                     res.status(),
@@ -407,4 +407,19 @@ pub async fn http_get_external(
     }
 
     Ok(res.json().await?)
+}
+
+async fn parse_rate_limit_error(res: Response) -> ClientError {
+    let body: serde_json::Value = res.json().await.unwrap_or_default();
+    let secs = body["error"]
+        .as_str()
+        .and_then(|msg| {
+            // "rate limit exceeded, try again after: X mins"
+            msg.split("after: ")
+                .nth(1)
+                .and_then(|s| s.trim_end_matches(" mins").parse::<u64>().ok())
+                .map(|mins| mins * 60)
+        })
+        .unwrap_or(60); // fallback to 60s if parsing fails
+    ClientError::RateLimited(secs)
 }
