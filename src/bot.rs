@@ -1,8 +1,11 @@
-use crate::utils::{
-    balance::{get_min_balance, max_deposit},
-    maths::{
-        random_base_quantity_to_buy, random_base_quantity_to_sell, random_decimal, random_number,
-        random_quote_to_spend,
+use crate::{
+    constants,
+    utils::{
+        balance::{get_min_balance, max_deposit},
+        maths::{
+            random_base_quantity_to_buy, random_base_quantity_to_sell, random_decimal,
+            random_number, random_quote_to_spend,
+        },
     },
 };
 
@@ -39,19 +42,19 @@ struct TakerState {
     remaining_cycle: u8,
 }
 
+impl Default for TakerState {
+    fn default() -> Self {
+        TakerState {
+            bias: Bias::random_bias(),
+            remaining_cycle: constants::TICKER_STATE_CYCLE,
+        }
+    }
+}
+
 enum Bias {
     Bullish,
     Bearish,
     Neutral,
-}
-
-impl TakerState {
-    fn new() -> Self {
-        TakerState {
-            bias: Bias::random_bias(),
-            remaining_cycle: 15,
-        }
-    }
 }
 
 impl Bias {
@@ -127,7 +130,7 @@ impl Bot {
             client,
             config,
             taker_state: if role == BotRole::Taker {
-                Some(TakerState::new())
+                Some(TakerState::default())
             } else {
                 None
             },
@@ -137,6 +140,7 @@ impl Bot {
     }
 
     pub async fn run(&mut self) {
+        // login
         if let Err(e) = self
             .client
             .login(&self.config.email, &self.config.password)
@@ -148,10 +152,10 @@ impl Bot {
 
         tracing::info!(email = %self.config.email, "Bot logged in successfully");
 
-        // if self.taker_state.is_some() {
-        //     tracing::info!("Taker is sleeping for 1 min");
-        //     tokio::time::sleep(Duration::from_secs(60)).await
-        // }
+        if self.taker_state.is_some() {
+            tracing::info!("Taker is sleeping for 1 min");
+            tokio::time::sleep(Duration::from_secs(60)).await
+        }
 
         loop {
             if let Err(e) = self.cycle().await {
@@ -234,13 +238,16 @@ impl Bot {
         let asks_count = open_orders.len() - bids_count;
 
         let order_cap = self.config.order_cap.unwrap_or_else(|| {
-            tracing::warn!("Order cap not set using default value");
-            10_u8
+            tracing::warn!(
+                cap = constants::DEFAULT_ORDER_CAP,
+                "Order cap not set using default value"
+            );
+            constants::DEFAULT_ORDER_CAP
         });
 
         let spread = self.config.spread.unwrap_or_else(|| {
-            tracing::warn!("Spread not set using default value");
-            dec!(0.003)
+            tracing::warn!(spread = %constants::DEFAULT_SPREAD, "Spread not set using default value");
+            constants::DEFAULT_SPREAD
         });
 
         if bids_count < order_cap as usize {
@@ -328,11 +335,16 @@ impl Bot {
         if let Some(ticker_state) = self.taker_state.as_mut() {
             if ticker_state.remaining_cycle == 0 {
                 ticker_state.bias = Bias::random_bias();
-                ticker_state.remaining_cycle = 15;
+                ticker_state.remaining_cycle = constants::TICKER_STATE_CYCLE;
             }
 
             tracing::info!(bias = %ticker_state.bias, remaining_cycle = %ticker_state.remaining_cycle, "Bias for this cycle");
 
+            // Place taker buy or sell
+            // the bias influences the probability of it being a buy
+            // if Bullish => 70% chance of a buy AND 30% chance of sell
+            // if Bearish => 30% chance of a buy AND 70% chance of sell
+            // if Neutral => 50%
             if random_decimal(dec!(0), dec!(1)) <= ticker_state.bias.to_dec() {
                 let best_ask = match orderbook.asks.first() {
                     Some(level) => level.price,
@@ -343,6 +355,9 @@ impl Bot {
                     }
                 };
 
+                // for Bullish => buy size is more to eat through multiple ask level
+                // for Bearish => buy size is less
+                // Neutral is neutral
                 let price = best_ask;
                 let (min, max) = ticker_state.bias.buy_size();
                 let quantity = random_quote_to_spend(available_balance.quote_balance, min, max);
@@ -399,6 +414,8 @@ impl Bot {
 
                 ticker_state.remaining_cycle -= 1;
             }
+        } else {
+            tracing::warn!("No ticker state found");
         }
 
         Ok(())
@@ -550,8 +567,8 @@ impl Bot {
             let drift = (mid_price - order_price).abs() / mid_price;
 
             let stale_threshold = self.config.stale_threshold.unwrap_or_else(|| {
-                tracing::warn!("stale_threshold not set using default value");
-                dec!(0.003)
+                tracing::warn!(stale_threshold = %constants::STALE_THRESHOLD , "stale_threshold not set using default value");
+                constants::STALE_THRESHOLD
             });
 
             if drift > stale_threshold {
