@@ -12,20 +12,6 @@ pub struct Client {
     access_token: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("Unauthorized")]
-    Unauthorized,
-    #[error("Rate limited")]
-    RateLimited,
-    #[error("{0}")]
-    Other(String),
-    #[error(transparent)]
-    Network(#[from] reqwest::Error),
-    #[error(transparent)]
-    Parse(#[from] serde_json::Error),
-}
-
 impl Client {
     pub fn new(base_url: &str) -> Self {
         let http = reqwest::ClientBuilder::new()
@@ -40,7 +26,57 @@ impl Client {
         }
     }
 
-    pub async fn login(&mut self, email: &str, password: &str) -> Result<(), ClientError> {
+    fn auth_header(&self) -> Result<String, ClientError> {
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(ClientError::Unauthorized)?;
+        Ok(format!("Bearer {}", token))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("Unauthorized")]
+    Unauthorized,
+    #[error("Rate limited")]
+    RateLimited,
+    #[error("{0}")]
+    Other(String),
+    #[error(transparent)]
+    Network(#[from] reqwest::Error),
+    #[error(transparent)]
+    Parse(#[from] serde_json::Error),
+}
+
+// Bot is generic over T: ExchangeClient, not dyn ExchangeClient.
+// At compile time T resolves to a concrete type (e.g. Client) which is Send,
+// so tokio::spawn can verify Send on the concrete type directly.
+// The trait doesn't need to explicitly bound its futures as Send.
+#[allow(async_fn_in_trait)]
+pub trait ExchangeClient {
+    async fn login(&mut self, email: &str, password: &str) -> Result<(), ClientError>;
+    async fn refresh(&mut self) -> Result<(), ClientError>;
+    async fn get_active_pairs(&self) -> Result<Vec<TradingPairsResponse>, ClientError>;
+    async fn get_ticker(&self, symbol: &str) -> Result<TickerResponse, ClientError>;
+    async fn get_orderbook(&self, symbol: &str) -> Result<OrderBookResponse, ClientError>;
+    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OrderResponse>, ClientError>;
+    async fn get_balances(&self) -> Result<Vec<BalanceResponse>, ClientError>;
+    async fn deposit(&self, asset: &str, amount: Decimal) -> Result<BalanceResponse, ClientError>;
+    async fn place_order(
+        &self,
+        symbol: &str,
+        side: OrderSide,
+        order_type: OrderType,
+        price: Option<Decimal>,
+        quantity: Decimal,
+    ) -> Result<PlaceOrderResponse, ClientError>;
+    async fn cancel_order(&self, id: Uuid) -> Result<(), ClientError>;
+    async fn get_assets(&self) -> Result<Vec<AssetResponse>, ClientError>;
+}
+
+impl ExchangeClient for Client {
+    async fn login(&mut self, email: &str, password: &str) -> Result<(), ClientError> {
         let res = self
             .http
             .post(format!("{}/auth/login", self.base_url))
@@ -69,7 +105,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn refresh(&mut self) -> Result<(), ClientError> {
+    async fn refresh(&mut self) -> Result<(), ClientError> {
         let res = self
             .http
             .post(format!("{}/auth/refresh", self.base_url))
@@ -96,7 +132,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn get_active_pairs(&self) -> Result<Vec<TradingPairsResponse>, ClientError> {
+    async fn get_active_pairs(&self) -> Result<Vec<TradingPairsResponse>, ClientError> {
         let res = self
             .http
             .get(format!("{}/pairs/active", self.base_url))
@@ -120,7 +156,7 @@ impl Client {
         Ok(res.json().await?)
     }
 
-    pub async fn get_ticker(&self, symbol: &str) -> Result<TickerResponse, ClientError> {
+    async fn get_ticker(&self, symbol: &str) -> Result<TickerResponse, ClientError> {
         let res = self
             .http
             .get(format!(
@@ -148,7 +184,7 @@ impl Client {
         Ok(res.json().await?)
     }
 
-    pub async fn get_orderbook(&self, symbol: &str) -> Result<OrderBookResponse, ClientError> {
+    async fn get_orderbook(&self, symbol: &str) -> Result<OrderBookResponse, ClientError> {
         let res = self
             .http
             .get(format!(
@@ -176,7 +212,7 @@ impl Client {
         Ok(res.json().await?)
     }
 
-    pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OrderResponse>, ClientError> {
+    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OrderResponse>, ClientError> {
         let res = self
             .http
             .get(format!(
@@ -207,7 +243,7 @@ impl Client {
         Ok(paginated_res.data)
     }
 
-    pub async fn get_balances(&self) -> Result<Vec<BalanceResponse>, ClientError> {
+    async fn get_balances(&self) -> Result<Vec<BalanceResponse>, ClientError> {
         let res = self
             .http
             .get(format!("{}/balances", self.base_url))
@@ -232,11 +268,7 @@ impl Client {
         Ok(res.json().await?)
     }
 
-    pub async fn deposit(
-        &self,
-        asset: &str,
-        amount: Decimal,
-    ) -> Result<BalanceResponse, ClientError> {
+    async fn deposit(&self, asset: &str, amount: Decimal) -> Result<BalanceResponse, ClientError> {
         let res = self
             .http
             .post(format!("{}/balances/deposit", self.base_url))
@@ -262,7 +294,7 @@ impl Client {
         Ok(res.json().await?)
     }
 
-    pub async fn place_order(
+    async fn place_order(
         &self,
         symbol: &str,
         side: OrderSide,
@@ -306,7 +338,7 @@ impl Client {
         // Ok(res.json().await?)
     }
 
-    pub async fn cancel_order(&self, id: Uuid) -> Result<(), ClientError> {
+    async fn cancel_order(&self, id: Uuid) -> Result<(), ClientError> {
         let res = self
             .http
             .delete(format!("{}/orders/{}", self.base_url, id))
@@ -331,7 +363,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn get_assets(&self) -> Result<Vec<AssetResponse>, ClientError> {
+    async fn get_assets(&self) -> Result<Vec<AssetResponse>, ClientError> {
         let res = self
             .http
             .get(format!("{}/assets", self.base_url))
@@ -351,14 +383,6 @@ impl Client {
         }
 
         Ok(res.json().await?)
-    }
-
-    fn auth_header(&self) -> Result<String, ClientError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ClientError::Unauthorized)?;
-        Ok(format!("Bearer {}", token))
     }
 }
 

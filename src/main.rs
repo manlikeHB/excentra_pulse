@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use excentra_pulse::{bot::Bot, client::Client, config::Config, price_service::PriceService};
+use excentra_pulse::{
+    bot::Bot,
+    client::{Client, ExchangeClient},
+    config::Config,
+    price_service::PriceService,
+};
 use tracing::Instrument;
 
 #[tokio::main]

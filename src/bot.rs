@@ -17,14 +17,14 @@ use std::{
 };
 
 use crate::{
-    client::{Client, ClientError},
+    client::{ClientError, ExchangeClient},
     config::{BotRole, Config},
     price_service::PriceService,
     types::{OrderResponse, OrderSide, OrderType},
 };
 
-pub struct Bot {
-    client: Client,
+pub struct Bot<T: ExchangeClient> {
+    client: T,
     config: Config,
     taker_state: Option<TakerState>,
     price_service: Arc<PriceService>,
@@ -119,13 +119,8 @@ macro_rules! try_call {
     };
 }
 
-impl Bot {
-    pub fn new(
-        config: Config,
-        client: Client,
-        role: BotRole,
-        price_service: Arc<PriceService>,
-    ) -> Self {
+impl<T: ExchangeClient> Bot<T> {
+    pub fn new(config: Config, client: T, role: BotRole, price_service: Arc<PriceService>) -> Self {
         Bot {
             client,
             config,
