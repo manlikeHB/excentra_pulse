@@ -56,7 +56,7 @@ impl Config {
                     let interval_secs = parse_env::<u64>(&format!("BOT_{i}_INTERVAL_SECS"));
                     let stale_threshold = parse_env::<Decimal>(&format!("BOT_{i}_STALE_THRESHOLD"));
 
-                    let order_cap = parse_env::<u8>("ORDER_CAP");
+                    let order_cap = parse_env::<u8>(&format!("BOT_{i}_ORDER_CAP"));
 
                     let config = Self::new(
                         email,

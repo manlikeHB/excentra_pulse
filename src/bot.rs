@@ -147,9 +147,9 @@ impl<T: ExchangeClient> Bot<T> {
 
         tracing::info!(email = %self.config.email, "Bot logged in successfully");
 
+        // taker: cancel any stale resting orders from previous runs
         if self.taker_state.is_some() {
-            tracing::info!("Taker is sleeping for 1 min");
-            tokio::time::sleep(Duration::from_secs(60)).await
+            self.cancel_all_open_orders().await;
         }
 
         loop {
@@ -183,32 +183,42 @@ impl<T: ExchangeClient> Bot<T> {
             return Ok(());
         }
 
-        let selected_pair = pairs[random_number(0_usize, pairs.len() - 1_usize)].clone();
-        let symbol = selected_pair.symbol.as_str();
-        let base_asset = selected_pair.base_asset.as_str();
-        let quote_asset = selected_pair.quote_asset.as_str();
+        for pair in pairs {
+            let symbol = pair.symbol.as_str();
+            let base_asset = pair.base_asset.as_str();
+            let quote_asset = pair.quote_asset.as_str();
 
-        tracing::info!(symbol = %symbol, "Selected pair for this cycle");
+            let mid_price = match self.get_mid_price(symbol, base_asset).await {
+                Some(price) => price,
+                None => {
+                    tracing::warn!(symbol = %symbol, "No price available, skipping pair");
+                    continue;
+                }
+            };
 
-        let mid_price = match self.get_mid_price(symbol, base_asset).await {
-            Some(price) => price,
-            None => {
-                tracing::warn!(symbol = %symbol, "No price available, skipping cycle");
-                return Ok(());
+            // re-fetch per pair to get accurate post-trade balances
+            let pair_balance = match self.ensure_balance(base_asset, quote_asset).await {
+                Ok(Some(b)) => b,
+                _ => {
+                    tracing::warn!(symbol = %symbol, "Balance check failed, skipping pair");
+                    continue;
+                }
+            };
+
+            match self.config.role {
+                BotRole::Maker => self.maker_cycle(symbol, mid_price, &pair_balance).await?,
+                BotRole::Taker => self.taker_cycle(symbol, &pair_balance).await?,
             }
-        };
+        }
 
-        let pair_balance = match self.ensure_balance(base_asset, quote_asset).await {
-            Ok(Some(pair_balance)) => pair_balance,
-            _ => return Ok(()),
-        };
-
-        match self.config.role {
-            BotRole::Maker => {
-                self.maker_cycle(&symbol, mid_price, &pair_balance).await?;
-            }
-            BotRole::Taker => {
-                self.taker_cycle(&symbol, &pair_balance).await?;
+        // Decrement remaining_cycle once per full cycle, not per pair
+        if let Some(state) = self.taker_state.as_mut() {
+            if state.remaining_cycle == 0 {
+                state.bias = Bias::random_bias();
+                state.remaining_cycle = constants::TICKER_STATE_CYCLE;
+                tracing::info!(bias = %state.bias, "Bias rotated");
+            } else {
+                state.remaining_cycle -= 1;
             }
         }
 
@@ -221,6 +231,13 @@ impl<T: ExchangeClient> Bot<T> {
         mid_price: Decimal,
         available_balance: &PairBalance,
     ) -> Result<()> {
+        // Safety guard — maker_cycle should never run for a taker bot
+        // TODO: Investigate why the taker is able to place limit orders
+        if self.config.role != BotRole::Maker {
+            tracing::error!("maker_cycle called on non-maker bot, this is a bug");
+            return Ok(());
+        }
+
         let open_orders = match self.cancel_stale_orders(symbol, mid_price).await? {
             Some(orders) => orders,
             None => return Ok(()),
@@ -319,6 +336,12 @@ impl<T: ExchangeClient> Bot<T> {
     }
 
     async fn taker_cycle(&mut self, symbol: &str, available_balance: &PairBalance) -> Result<()> {
+        // Safety guard
+        if self.config.role != BotRole::Taker {
+            tracing::error!("taker_cycle called on non-taker bot, this is a bug");
+            return Ok(());
+        }
+
         let orderbook = match try_call!(self, self.client.get_orderbook(symbol)) {
             Ok(o) => o,
             Err(e) => {
@@ -328,11 +351,6 @@ impl<T: ExchangeClient> Bot<T> {
         };
 
         if let Some(ticker_state) = self.taker_state.as_mut() {
-            if ticker_state.remaining_cycle == 0 {
-                ticker_state.bias = Bias::random_bias();
-                ticker_state.remaining_cycle = constants::TICKER_STATE_CYCLE;
-            }
-
             tracing::info!(bias = %ticker_state.bias, remaining_cycle = %ticker_state.remaining_cycle, "Bias for this cycle");
 
             // Place taker buy or sell
@@ -345,7 +363,6 @@ impl<T: ExchangeClient> Bot<T> {
                     Some(level) => level.price,
                     None => {
                         tracing::warn!(symbol = %symbol, "Ask side empty, skipping taker buy");
-                        ticker_state.remaining_cycle -= 1;
                         return Ok(());
                     }
                 };
@@ -373,14 +390,11 @@ impl<T: ExchangeClient> Bot<T> {
                 } else {
                     tracing::info!(symbol = %symbol, price = %price, quantity = %quantity, "Placed taker buy");
                 }
-
-                ticker_state.remaining_cycle -= 1;
             } else {
                 let best_bid = match orderbook.bids.first() {
                     Some(level) => level.price,
                     None => {
                         tracing::warn!(symbol = %symbol, "Bid side empty, skipping taker sell");
-                        ticker_state.remaining_cycle -= 1;
                         return Ok(());
                     }
                 };
@@ -406,8 +420,6 @@ impl<T: ExchangeClient> Bot<T> {
                 } else {
                     tracing::info!(symbol = %symbol, price = %price, quantity = %quantity, "Placed taker sell");
                 }
-
-                ticker_state.remaining_cycle -= 1;
             }
         } else {
             tracing::warn!("No ticker state found");
@@ -580,5 +592,24 @@ impl<T: ExchangeClient> Bot<T> {
 
     fn trigger_backoff(&mut self) {
         self.backoff_until = Some(Instant::now());
+    }
+
+    async fn cancel_all_open_orders(&mut self) {
+        let pairs = match self.client.get_active_pairs().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        for pair in pairs {
+            if let Ok(orders) = self.client.get_open_orders(&pair.symbol).await {
+                for order in orders {
+                    if let Err(e) = self.client.cancel_order(order.id).await {
+                        tracing::warn!(error = %e, order_id = %order.id, "Failed to cancel order on startup");
+                    } else {
+                        tracing::info!(order_id = %order.id, "Cancelled stale order on startup");
+                    }
+                }
+            }
+        }
     }
 }
