@@ -17,7 +17,7 @@ pub struct TradingPairsResponse {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct TickerResponse {
     pub symbol: String,
     pub last_price: Decimal,
@@ -27,34 +27,34 @@ pub struct TickerResponse {
     pub price_change_pct: Decimal,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct OrderBookResponse {
     pub symbol: String,
     pub bids: Vec<PriceLevelResponse>,
     pub asks: Vec<PriceLevelResponse>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct PriceLevelResponse {
     pub price: Decimal,
     pub quantity: Decimal,
 }
 
-#[derive(Debug, serde::Deserialize, PartialEq, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, PartialEq, serde::Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderSide {
     Buy,
     Sell,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderType {
     Market,
     Limit,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderStatus {
     Open,
@@ -64,7 +64,7 @@ pub enum OrderStatus {
     Cancelled,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct OrderResponse {
     pub id: Uuid,
     pub symbol: String,
@@ -93,7 +93,7 @@ pub struct TradeInfo {
     pub quantity: Decimal,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct BalanceResponse {
     pub asset: String,
     pub available: Decimal,

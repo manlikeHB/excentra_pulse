@@ -609,3 +609,664 @@ impl<T: ExchangeClient> Bot<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::*;
+    use chrono::Utc;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    // ─── MockClient ───────────────────────────────────────────────────────────
+
+    #[derive(Clone)]
+    struct MockClient {
+        ticker: Option<TickerResponse>,
+        orderbook: OrderBookResponse,
+        open_orders: Vec<OrderResponse>,
+        balances: Vec<BalanceResponse>,
+        placed_orders: Arc<Mutex<Vec<(OrderSide, OrderType, Option<Decimal>, Decimal)>>>,
+        cancelled_orders: Arc<Mutex<Vec<Uuid>>>,
+        deposit_called: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl MockClient {
+        fn new() -> Self {
+            Self {
+                ticker: Some(TickerResponse {
+                    symbol: "BTC/USDT".to_string(),
+                    last_price: dec!(75000),
+                    high_24h: dec!(76000),
+                    low_24h: dec!(74000),
+                    volume_24h: dec!(100),
+                    price_change_pct: dec!(0.5),
+                }),
+                orderbook: OrderBookResponse {
+                    symbol: "BTC/USDT".to_string(),
+                    bids: vec![PriceLevelResponse {
+                        price: dec!(74900),
+                        quantity: dec!(0.1),
+                    }],
+                    asks: vec![PriceLevelResponse {
+                        price: dec!(75100),
+                        quantity: dec!(0.1),
+                    }],
+                },
+                open_orders: vec![],
+                balances: vec![
+                    BalanceResponse {
+                        asset: "BTC".to_string(),
+                        available: dec!(0.1),
+                        held: dec!(0),
+                    },
+                    BalanceResponse {
+                        asset: "USDT".to_string(),
+                        available: dec!(1000),
+                        held: dec!(0),
+                    },
+                ],
+                placed_orders: Arc::new(Mutex::new(vec![])),
+                cancelled_orders: Arc::new(Mutex::new(vec![])),
+                deposit_called: Arc::new(Mutex::new(vec![])),
+            }
+        }
+    }
+
+    impl ExchangeClient for MockClient {
+        async fn login(&mut self, _email: &str, _password: &str) -> Result<(), ClientError> {
+            Ok(())
+        }
+
+        async fn refresh(&mut self) -> Result<(), ClientError> {
+            Ok(())
+        }
+
+        async fn get_active_pairs(&self) -> Result<Vec<TradingPairsResponse>, ClientError> {
+            Ok(vec![TradingPairsResponse {
+                id: Uuid::new_v4(),
+                base_asset: "BTC".to_string(),
+                quote_asset: "USDT".to_string(),
+                symbol: "BTC/USDT".to_string(),
+                is_active: true,
+                created_at: Utc::now(),
+            }])
+        }
+
+        async fn get_ticker(&self, _symbol: &str) -> Result<TickerResponse, ClientError> {
+            match &self.ticker {
+                Some(t) => Ok(TickerResponse {
+                    symbol: t.symbol.clone(),
+                    last_price: t.last_price,
+                    high_24h: t.high_24h,
+                    low_24h: t.low_24h,
+                    volume_24h: t.volume_24h,
+                    price_change_pct: t.price_change_pct,
+                }),
+                None => Err(ClientError::Other("No ticker".to_string())),
+            }
+        }
+
+        async fn get_orderbook(&self, _symbol: &str) -> Result<OrderBookResponse, ClientError> {
+            Ok(OrderBookResponse {
+                symbol: self.orderbook.symbol.clone(),
+                bids: self.orderbook.bids.clone(),
+                asks: self.orderbook.asks.clone(),
+            })
+        }
+
+        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OrderResponse>, ClientError> {
+            Ok(self.open_orders.clone())
+        }
+
+        async fn get_balances(&self) -> Result<Vec<BalanceResponse>, ClientError> {
+            Ok(self.balances.clone())
+        }
+
+        async fn deposit(
+            &self,
+            asset: &str,
+            _amount: Decimal,
+        ) -> Result<BalanceResponse, ClientError> {
+            self.deposit_called.lock().unwrap().push(asset.to_string());
+            Ok(BalanceResponse {
+                asset: asset.to_string(),
+                available: dec!(1000),
+                held: dec!(0),
+            })
+        }
+
+        async fn place_order(
+            &self,
+            _symbol: &str,
+            side: OrderSide,
+            order_type: OrderType,
+            price: Option<Decimal>,
+            quantity: Decimal,
+        ) -> Result<PlaceOrderResponse, ClientError> {
+            self.placed_orders
+                .lock()
+                .unwrap()
+                .push((side, order_type, price, quantity));
+            Ok(PlaceOrderResponse {
+                order_id: Uuid::new_v4(),
+                status: OrderStatus::Open,
+                filled_quantity: dec!(0),
+                remaining_quantity: quantity,
+                trades: vec![],
+            })
+        }
+
+        async fn cancel_order(&self, id: Uuid) -> Result<(), ClientError> {
+            self.cancelled_orders.lock().unwrap().push(id);
+            Ok(())
+        }
+
+        async fn get_assets(&self) -> Result<Vec<AssetResponse>, ClientError> {
+            Ok(vec![])
+        }
+    }
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    fn maker_config() -> Config {
+        Config {
+            email: "bot@test.com".to_string(),
+            password: "password".to_string(),
+            interval_secs: 10,
+            role: BotRole::Maker,
+            spread: Some(dec!(0.002)),
+            stale_threshold: Some(dec!(0.005)),
+            order_cap: Some(3),
+        }
+    }
+
+    fn taker_config() -> Config {
+        Config {
+            email: "taker@test.com".to_string(),
+            password: "password".to_string(),
+            interval_secs: 10,
+            role: BotRole::Taker,
+            spread: None,
+            stale_threshold: None,
+            order_cap: None,
+        }
+    }
+
+    fn price_service() -> Arc<PriceService> {
+        Arc::new(PriceService::new(vec![]))
+    }
+
+    fn make_open_order(side: OrderSide, price: Decimal) -> OrderResponse {
+        OrderResponse {
+            id: Uuid::new_v4(),
+            symbol: "BTC/USDT".to_string(),
+            side,
+            order_type: OrderType::Limit,
+            price: Some(price),
+            quantity: dec!(0.01),
+            remaining_quantity: dec!(0.01),
+            status: OrderStatus::Open,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // ─── Maker Tests ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn maker_places_bid_and_ask_when_book_empty() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.maker_cycle(
+            "BTC/USDT",
+            dec!(75000),
+            &PairBalance {
+                base_balance: dec!(0.1),
+                quote_balance: dec!(1000),
+            },
+        )
+        .await
+        .unwrap();
+
+        let orders = placed.lock().unwrap();
+        assert_eq!(orders.len(), 2);
+
+        // first order is a limit buy
+        assert_eq!(orders[0].0, OrderSide::Buy);
+        assert!(matches!(orders[0].1, OrderType::Limit));
+        assert!(orders[0].2.is_some()); // has a price
+
+        // second order is a limit sell
+        assert_eq!(orders[1].0, OrderSide::Sell);
+        assert!(matches!(orders[1].1, OrderType::Limit));
+        assert!(orders[1].2.is_some());
+    }
+
+    #[tokio::test]
+    async fn maker_bid_price_is_below_mid() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        let mid = dec!(75000);
+        bot.maker_cycle(
+            "BTC/USDT",
+            mid,
+            &PairBalance {
+                base_balance: dec!(0.1),
+                quote_balance: dec!(1000),
+            },
+        )
+        .await
+        .unwrap();
+
+        let orders = placed.lock().unwrap();
+        let bid_price = orders[0].2.unwrap();
+        let ask_price = orders[1].2.unwrap();
+
+        assert!(bid_price < mid, "bid should be below mid price");
+        assert!(ask_price > mid, "ask should be above mid price");
+    }
+
+    #[tokio::test]
+    async fn maker_skips_bid_when_cap_reached() {
+        let mut client = MockClient::new();
+        // fill bid side to cap (3)
+        client.open_orders = vec![
+            make_open_order(OrderSide::Buy, dec!(74850)),
+            make_open_order(OrderSide::Buy, dec!(74850)),
+            make_open_order(OrderSide::Buy, dec!(74850)),
+        ];
+
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.maker_cycle(
+            "BTC/USDT",
+            dec!(75000),
+            &PairBalance {
+                base_balance: dec!(0.1),
+                quote_balance: dec!(1000),
+            },
+        )
+        .await
+        .unwrap();
+
+        let orders = placed.lock().unwrap();
+        // only ask should be placed, bid is capped
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0, OrderSide::Sell);
+    }
+
+    #[tokio::test]
+    async fn maker_skips_ask_when_cap_reached() {
+        let mut client = MockClient::new();
+        // fill ask side to cap (3)
+        client.open_orders = vec![
+            make_open_order(OrderSide::Sell, dec!(75150)),
+            make_open_order(OrderSide::Sell, dec!(75150)),
+            make_open_order(OrderSide::Sell, dec!(75150)),
+        ];
+
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.maker_cycle(
+            "BTC/USDT",
+            dec!(75000),
+            &PairBalance {
+                base_balance: dec!(0.1),
+                quote_balance: dec!(1000),
+            },
+        )
+        .await
+        .unwrap();
+
+        let orders = placed.lock().unwrap();
+        // only bid should be placed
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0, OrderSide::Buy);
+    }
+
+    #[tokio::test]
+    async fn maker_cancels_stale_order_and_replaces() {
+        let mut client = MockClient::new();
+        // order placed at 70000, mid is now 75000 — drift = 6.7%, above threshold 0.5%
+        client.open_orders = vec![make_open_order(OrderSide::Buy, dec!(70000))];
+
+        let cancelled = client.cancelled_orders.clone();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.maker_cycle(
+            "BTC/USDT",
+            dec!(75000),
+            &PairBalance {
+                base_balance: dec!(0.1),
+                quote_balance: dec!(1000),
+            },
+        )
+        .await
+        .unwrap();
+
+        // stale order was cancelled
+        assert_eq!(cancelled.lock().unwrap().len(), 1);
+
+        // new bid and ask placed
+        assert_eq!(placed.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn maker_keeps_fresh_order_within_threshold() {
+        let mut client = MockClient::new();
+        // order at 74925 — drift from 75000 = 0.1%, below threshold 0.5%
+        client.open_orders = vec![make_open_order(OrderSide::Buy, dec!(74925))];
+
+        let cancelled = client.cancelled_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.maker_cycle(
+            "BTC/USDT",
+            dec!(75000),
+            &PairBalance {
+                base_balance: dec!(0.1),
+                quote_balance: dec!(1000),
+            },
+        )
+        .await
+        .unwrap();
+
+        // order should NOT be cancelled
+        assert_eq!(cancelled.lock().unwrap().len(), 0);
+    }
+
+    // ─── Taker Tests ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn taker_places_market_buy_when_bullish() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(taker_config(), client, BotRole::Taker, price_service());
+        if let Some(state) = bot.taker_state.as_mut() {
+            state.bias = Bias::Bullish;
+        }
+
+        let mut got_buy = false;
+        for _ in 0..20 {
+            placed.lock().unwrap().clear();
+            bot.taker_cycle(
+                "BTC/USDT",
+                &PairBalance {
+                    base_balance: dec!(0.1),
+                    quote_balance: dec!(1000),
+                },
+            )
+            .await
+            .unwrap();
+
+            let orders = placed.lock().unwrap();
+            if !orders.is_empty() && orders[0].0 == OrderSide::Buy {
+                got_buy = true;
+                assert!(matches!(orders[0].1, OrderType::Market));
+                assert!(orders[0].2.is_none());
+                break;
+            }
+        }
+        assert!(
+            got_buy,
+            "expected at least one market buy with Bullish bias"
+        );
+    }
+
+    #[tokio::test]
+    async fn taker_places_market_sell_when_bearish() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(taker_config(), client, BotRole::Taker, price_service());
+
+        // force bearish bias — sell path always taken (random_decimal always > 0.3)
+        // we set bias to Bearish and override the roll by making remaining_cycle 0
+        // to ensure the bearish path. Since random is involved, we just verify
+        // that when we force sell side, a market sell is placed.
+        if let Some(state) = bot.taker_state.as_mut() {
+            state.bias = Bias::Bearish;
+        }
+
+        // run multiple times — with Bearish (0.3 threshold), sell path triggers ~70%
+        // we just need one sell to confirm the path works
+        let mut got_sell = false;
+        for _ in 0..20 {
+            placed.lock().unwrap().clear();
+            bot.taker_cycle(
+                "BTC/USDT",
+                &PairBalance {
+                    base_balance: dec!(0.1),
+                    quote_balance: dec!(1000),
+                },
+            )
+            .await
+            .unwrap();
+
+            let orders = placed.lock().unwrap();
+            if !orders.is_empty() && orders[0].0 == OrderSide::Sell {
+                got_sell = true;
+                assert!(matches!(orders[0].1, OrderType::Market));
+                assert!(orders[0].2.is_none());
+                break;
+            }
+        }
+        assert!(
+            got_sell,
+            "expected at least one market sell with Bearish bias"
+        );
+    }
+
+    #[tokio::test]
+    async fn taker_skips_buy_when_asks_empty() {
+        let mut client = MockClient::new();
+        client.orderbook.asks = vec![];
+
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(taker_config(), client, BotRole::Taker, price_service());
+        if let Some(state) = bot.taker_state.as_mut() {
+            state.bias = Bias::Bullish;
+        }
+
+        // run multiple times to ensure the buy path is triggered at least once
+        let mut buy_path_skipped = false;
+        for _ in 0..20 {
+            placed.lock().unwrap().clear();
+            bot.taker_cycle(
+                "BTC/USDT",
+                &PairBalance {
+                    base_balance: dec!(0.1),
+                    quote_balance: dec!(1000),
+                },
+            )
+            .await
+            .unwrap();
+
+            let orders = placed.lock().unwrap();
+            // if no order placed, buy path was triggered and correctly skipped
+            if orders.is_empty() {
+                buy_path_skipped = true;
+                break;
+            }
+            // if a sell was placed, that's fine — sell path triggered, not what we're testing
+        }
+
+        assert!(
+            buy_path_skipped,
+            "expected buy to be skipped when asks are empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn taker_skips_sell_when_bids_empty() {
+        let mut client = MockClient::new();
+        client.orderbook.bids = vec![]; // empty bid side
+
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(taker_config(), client, BotRole::Taker, price_service());
+        if let Some(state) = bot.taker_state.as_mut() {
+            state.bias = Bias::Bearish; // force sell path
+        }
+
+        // run until we hit a sell attempt
+        for _ in 0..20 {
+            placed.lock().unwrap().clear();
+            bot.taker_cycle(
+                "BTC/USDT",
+                &PairBalance {
+                    base_balance: dec!(0.1),
+                    quote_balance: dec!(1000),
+                },
+            )
+            .await
+            .unwrap();
+
+            // if sell path was triggered, nothing should be placed
+            let orders = placed.lock().unwrap();
+            assert!(
+                orders.is_empty() || orders[0].0 == OrderSide::Buy,
+                "sell should be skipped with empty bids"
+            );
+        }
+    }
+
+    // ─── Balance / Deposit Tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deposit_triggered_when_balance_below_minimum() {
+        let mut client = MockClient::new();
+        // BTC balance below minimum (min = 0.05 / 10 = 0.005)
+        client.balances = vec![
+            BalanceResponse {
+                asset: "BTC".to_string(),
+                available: dec!(0.001), // below min
+                held: dec!(0),
+            },
+            BalanceResponse {
+                asset: "USDT".to_string(),
+                available: dec!(1000),
+                held: dec!(0),
+            },
+        ];
+
+        let deposit_called = client.deposit_called.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.ensure_balance("BTC", "USDT").await.unwrap();
+
+        let deposited = deposit_called.lock().unwrap();
+        assert!(deposited.contains(&"BTC".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_deposit_when_balance_above_minimum() {
+        let client = MockClient::new(); // default balances are above minimum
+
+        let deposit_called = client.deposit_called.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        bot.ensure_balance("BTC", "USDT").await.unwrap();
+
+        assert!(deposit_called.lock().unwrap().is_empty());
+    }
+
+    // ─── Backoff Tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cycle_skips_when_in_backoff() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+
+        // trigger backoff for 60 seconds
+        bot.trigger_backoff(60);
+
+        bot.cycle().await.unwrap();
+
+        // no orders should have been placed
+        assert!(placed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cycle_resumes_after_backoff_expires() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+
+        // set backoff to already expired (1 nanosecond ago)
+        bot.backoff_until = Some(Instant::now() - Duration::from_nanos(1));
+
+        bot.cycle().await.unwrap();
+
+        // backoff cleared and orders placed
+        assert!(bot.backoff_until.is_none());
+        assert!(!placed.lock().unwrap().is_empty());
+    }
+
+    // ─── Price Resolution Tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_mid_price_uses_ticker_when_available() {
+        let client = MockClient::new(); // ticker returns 75000
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        let price = bot.get_mid_price("BTC/USDT", "BTC").await;
+
+        assert_eq!(price, Some(dec!(75000)));
+    }
+
+    #[tokio::test]
+    async fn get_mid_price_falls_back_to_hardcoded_when_no_ticker() {
+        let mut client = MockClient::new();
+        client.ticker = None; // no ticker available
+
+        let mut bot = Bot::new(maker_config(), client, BotRole::Maker, price_service());
+        let price = bot.get_mid_price("BTC/USDT", "BTC").await;
+
+        // hardcoded fallback for BTC
+        assert_eq!(price, Some(dec!(75000)));
+    }
+
+    #[tokio::test]
+    async fn taker_never_places_limit_orders() {
+        let client = MockClient::new();
+        let placed = client.placed_orders.clone();
+
+        let mut bot = Bot::new(taker_config(), client, BotRole::Taker, price_service());
+
+        // run many cycles to cover both buy and sell paths
+        for _ in 0..1000 {
+            bot.taker_cycle(
+                "BTC/USDT",
+                &PairBalance {
+                    base_balance: dec!(0.1),
+                    quote_balance: dec!(1000),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let orders = placed.lock().unwrap();
+        for order in orders.iter() {
+            assert!(
+                matches!(order.1, OrderType::Market),
+                "taker placed a non-market order: {:?}",
+                order.1
+            );
+        }
+    }
+}
