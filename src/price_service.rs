@@ -21,7 +21,7 @@ impl PriceService {
             prices: Arc::new(RwLock::new(HashMap::new())),
             assets: assets
                 .into_iter()
-                .filter(|a| a.symbol != "USDT".to_string())
+                .filter(|a| a.symbol != "USDT")
                 .filter(|a| a.coingecko_id.is_some())
                 .map(|a| (a.coingecko_id.unwrap(), a.symbol.to_owned()))
                 .collect(),

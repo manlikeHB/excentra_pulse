@@ -513,7 +513,7 @@ impl<T: ExchangeClient> Bot<T> {
 
         // get cached price from price service
         match self.price_service.get_price(base_asset) {
-            Some(price) => return Some(price),
+            Some(price) => Some(price),
             None => {
                 tracing::warn!(asset = %base_asset, "Price service empty, using hardcoded fallback");
                 let price = match base_asset {
@@ -547,7 +547,7 @@ impl<T: ExchangeClient> Bot<T> {
         symbol: &str,
         mid_price: Decimal,
     ) -> Result<Option<Vec<OrderResponse>>> {
-        let open_orders = match try_call!(self, self.client.get_open_orders(&symbol)) {
+        let open_orders = match try_call!(self, self.client.get_open_orders(symbol)) {
             Ok(orders) => orders,
             Err(e) => {
                 tracing::warn!(symbol = %symbol, error = %e, "Failed to fetch open orders, skipping cycle");
