@@ -1,0 +1,28 @@
+# Build artifacts
+target/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Docs
+*.md
+LICENSE
+
+# CI
+.github/
+
+# Docker files themselves (not needed in build context)
+Dockerfile
+docker-compose.yml
+.dockerignore

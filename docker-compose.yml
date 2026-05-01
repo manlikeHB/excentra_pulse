@@ -1,0 +1,35 @@
+services:
+  pulse:
+    networks:
+      - excentra-net
+    build: .
+    environment:
+      EXCHANGE_URL: ${EXCHANGE_URL}
+      BOT_COUNT: ${BOT_COUNT}
+
+      BOT_1_EMAIL: ${BOT_1_EMAIL}
+      BOT_1_PASSWORD: ${BOT_1_PASSWORD}
+      BOT_1_ROLE: ${BOT_1_ROLE}
+      BOT_1_SPREAD: ${BOT_1_SPREAD}
+      BOT_1_INTERVAL_SECS: ${BOT_1_INTERVAL_SECS}
+      BOT_1_STALE_THRESHOLD: ${BOT_1_STALE_THRESHOLD}
+      BOT_1_ORDER_CAP: ${BOT_1_ORDER_CAP}
+
+      BOT_2_EMAIL: ${BOT_2_EMAIL}
+      BOT_2_PASSWORD: ${BOT_2_PASSWORD}
+      BOT_2_ROLE: ${BOT_2_ROLE}
+      BOT_2_INTERVAL_SECS: ${BOT_2_INTERVAL_SECS}
+
+      BOT_3_EMAIL: ${BOT_3_EMAIL}
+      BOT_3_PASSWORD: ${BOT_3_PASSWORD}
+      BOT_3_ROLE: ${BOT_3_ROLE}
+      BOT_3_SPREAD: ${BOT_3_SPREAD}
+      BOT_3_INTERVAL_SECS: ${BOT_3_INTERVAL_SECS}
+      BOT_3_STALE_THRESHOLD: ${BOT_3_STALE_THRESHOLD}
+      BOT_3_ORDER_CAP: ${BOT_3_ORDER_CAP}
+
+    restart: unless-stopped
+
+networks: 
+  excentra-net:
+    external: true
