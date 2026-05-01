@@ -25,6 +25,8 @@ async fn main() -> Result<()> {
         }
     };
 
+    drop(client);
+
     let price_service = Arc::new(PriceService::new(assets));
     let ps = price_service.clone();
     tokio::spawn(async move {
@@ -35,7 +37,9 @@ async fn main() -> Result<()> {
     for (idx, config) in configs.into_iter().enumerate() {
         let role = config.role;
         let price_service = price_service.clone();
-        let mut bot = Bot::new(config, client.clone(), role, price_service.clone());
+        let base_url = format!("{}/api/v1", &exchange_url);
+        let bot_client = Client::new(&base_url);
+        let mut bot = Bot::new(config, bot_client, role, price_service.clone());
 
         let span = tracing::info_span!("Bot", bot_id = idx + 1, role = %role);
 
