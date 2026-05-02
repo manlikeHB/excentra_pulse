@@ -29,6 +29,11 @@ services:
       BOT_3_ORDER_CAP: ${BOT_3_ORDER_CAP}
 
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 networks: 
   excentra-net:
