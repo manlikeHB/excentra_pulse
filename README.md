@@ -8,7 +8,7 @@ Excentra Pulse keeps the order book alive by simulating real trading activity. I
 
 ## Why It Exists
 
-Excentra Exchange is a fully functional centralized exchange, but an exchange with no users has an empty order book and no trades. Pulse solves this by acting as the first participant — seeding the book with limit orders at realistic prices and continuously matching against them with market orders, keeping the 24h chart populated and the exchange looking alive.
+Excentra Exchange ([live demo](https://excentra.exchange)) is a fully functional centralized exchange, but an exchange with no users has an empty order book and no trades. Pulse solves this by acting as the first participant — seeding the book with limit orders at realistic prices and continuously matching against them with market orders, keeping the 24h chart populated and the exchange looking alive.
 
 ---
 
