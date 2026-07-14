@@ -20,7 +20,7 @@ use crate::{
     client::{ClientError, ExchangeClient},
     config::{BotRole, Config},
     price_service::PriceService,
-    types::{OrderResponse, OrderSide, OrderType},
+    types::{OrderResponse, OrderSide, OrderType, StpMode},
 };
 
 pub struct Bot<T: ExchangeClient> {
@@ -280,6 +280,9 @@ impl<T: ExchangeClient> Bot<T> {
                     OrderType::Limit,
                     Some(bid_price),
                     quantity,
+                    // let a fresh bid replace our own stale resting ask instead
+                    // of being rejected as a self-trade
+                    Some(StpMode::ExpireMaker),
                 )
                 .await
             {
@@ -315,6 +318,7 @@ impl<T: ExchangeClient> Bot<T> {
                     OrderType::Limit,
                     Some(ask_price),
                     quantity,
+                    Some(StpMode::ExpireMaker),
                 )
                 .await
             {
@@ -371,7 +375,14 @@ impl<T: ExchangeClient> Bot<T> {
 
                 if let Err(e) = self
                     .client
-                    .place_order(symbol, OrderSide::Buy, OrderType::Market, None, quantity)
+                    .place_order(
+                        symbol,
+                        OrderSide::Buy,
+                        OrderType::Market,
+                        None,
+                        quantity,
+                        None,
+                    )
                     .await
                 {
                     match e {
@@ -401,7 +412,14 @@ impl<T: ExchangeClient> Bot<T> {
 
                 if let Err(e) = self
                     .client
-                    .place_order(symbol, OrderSide::Sell, OrderType::Market, None, quantity)
+                    .place_order(
+                        symbol,
+                        OrderSide::Sell,
+                        OrderType::Market,
+                        None,
+                        quantity,
+                        None,
+                    )
                     .await
                 {
                     match e {
@@ -743,6 +761,7 @@ mod tests {
             order_type: OrderType,
             price: Option<Decimal>,
             quantity: Decimal,
+            _stp_mode: Option<StpMode>,
         ) -> Result<PlaceOrderResponse, ClientError> {
             self.placed_orders
                 .lock()

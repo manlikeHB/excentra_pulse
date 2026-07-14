@@ -54,6 +54,17 @@ pub enum OrderType {
     Limit,
 }
 
+// self-trade prevention mode — mirrors excentra's PlaceOrderRequest::stp_mode.
+// Ignored by the exchange for market orders. Maker bots should send
+// `ExpireMaker` on limit orders so a fresh quote can replace a stale one
+// instead of being rejected as a self-trade.
+#[derive(Debug, serde::Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum StpMode {
+    Reject,
+    ExpireMaker,
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum OrderStatus {

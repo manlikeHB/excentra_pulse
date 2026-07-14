@@ -63,6 +63,7 @@ pub trait ExchangeClient {
     async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OrderResponse>, ClientError>;
     async fn get_balances(&self) -> Result<Vec<BalanceResponse>, ClientError>;
     async fn deposit(&self, asset: &str, amount: Decimal) -> Result<BalanceResponse, ClientError>;
+    #[allow(clippy::too_many_arguments)]
     async fn place_order(
         &self,
         symbol: &str,
@@ -70,6 +71,7 @@ pub trait ExchangeClient {
         order_type: OrderType,
         price: Option<Decimal>,
         quantity: Decimal,
+        stp_mode: Option<StpMode>,
     ) -> Result<PlaceOrderResponse, ClientError>;
     async fn cancel_order(&self, id: Uuid) -> Result<(), ClientError>;
     async fn get_assets(&self) -> Result<Vec<AssetResponse>, ClientError>;
@@ -301,6 +303,7 @@ impl ExchangeClient for Client {
         order_type: OrderType,
         price: Option<Decimal>,
         quantity: Decimal,
+        stp_mode: Option<StpMode>,
     ) -> Result<PlaceOrderResponse, ClientError> {
         let res = self
             .http
@@ -310,7 +313,8 @@ impl ExchangeClient for Client {
                 "side": side,
                 "order_type": order_type,
                 "price": price.map(|p| p.to_string()),
-                "quantity": quantity.to_string()
+                "quantity": quantity.to_string(),
+                "stp_mode": stp_mode
             }))
             .header(AUTHORIZATION, self.auth_header()?)
             .send()
