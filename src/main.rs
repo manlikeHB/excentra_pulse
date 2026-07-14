@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
 
     let (exchange_url, configs) = Config::from_env();
-    let base_url = format!("{}/api/v1", &exchange_url);
+    let base_url = format!("{}/api/v1", exchange_url);
     let client = Client::new(&base_url);
 
     let assets = match client.get_assets().await {
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     for (idx, config) in configs.into_iter().enumerate() {
         let role = config.role;
         let price_service = price_service.clone();
-        let base_url = format!("{}/api/v1", &exchange_url);
+        let base_url = format!("{}/api/v1", exchange_url);
         let bot_client = Client::new(&base_url);
         let mut bot = Bot::new(config, bot_client, role, price_service.clone());
 
